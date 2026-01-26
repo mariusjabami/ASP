@@ -1,0 +1,26 @@
+=== LOG DE TREINO ASP ===
+Data: Jan 26 2026 11:02:47
+Comando: asp_train asp_train asp_train asp_train asp_train asp_train asp_train asp_train asp_train asp_train 
+
+CONFIGURAÇÃO:
+  Modelo: ariana_diabete
+  CSV: examples/datasets/diabetes.csv
+  Amostras: 115
+  Features: 8
+  Saídas: 1
+  Tem cabeçalho: sim
+  Arquitetura: [8->64->32->16->1]
+  Ativação: relu
+  Épocas: 1000
+  Taxa aprendizado: 0.0100
+
+RESULTADOS:
+  Erro final (MSE): 0.000000
+  Pasta modelo: modelos/ariana_diabete/
+
+ARQUIVOS GERADOS:
+  config.asp - Configuração completa da rede
+  pesos.asp - Pesos treinados (binário)
+  treino.log - Este arquivo
+
+=== FIM DO LOG ===
