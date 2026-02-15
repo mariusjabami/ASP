@@ -17,7 +17,6 @@ static float ativar(float x, const char* tipo) {
 
 static float derivada(float x, const char* tipo) {
     if (strcmp(tipo, "sigmoid") == 0) return asp_sigmoid_derivada(x);
-    if (strcmp(tipo, "degrau") == 0) return 1.0f;
     if (strcmp(tipo, "relu") == 0) return (x > 0) ? 1.0f : 0.0f;
     return 1.0f;
 }
@@ -70,10 +69,11 @@ float* asp_prever(ASP_Rede* rede, float entrada[]) {
             for (int i = 0; i < in; i++)
                 soma += atual[i] * rede->pesos[c][i * out + n];
             
+            // Hidden layers → ReLU, Output → ativação escolhida
             if (c < rede->camadas-2)
-                proximo[n] = ativar(soma, rede->ativacao);
+                proximo[n] = ativar(soma, "relu");
             else
-                proximo[n] = soma; // Última camada linear
+                proximo[n] = ativar(soma, rede->ativacao);
         }
         
         free(atual);
@@ -111,9 +111,9 @@ void asp_treinar(ASP_Rede* rede, float** X, float** y, int amostras, int epocas)
                         z[c][n] += ativacoes[c][i] * rede->pesos[c][i * out + n];
                     
                     if (c < rede->camadas-2)
-                        ativacoes[c+1][n] = ativar(z[c][n], rede->ativacao);
+                        ativacoes[c+1][n] = ativar(z[c][n], "relu");
                     else
-                        ativacoes[c+1][n] = z[c][n];
+                        ativacoes[c+1][n] = ativar(z[c][n], rede->ativacao);
                 }
             }
             
@@ -132,7 +132,10 @@ void asp_treinar(ASP_Rede* rede, float** X, float** y, int amostras, int epocas)
             deltas[c] = malloc(rede->neuronios[c+1] * sizeof(float));
             for (int n = 0; n < rede->neuronios[c+1]; n++) {
                 float saida = ativacoes[c+1][n];
-                deltas[c][n] = (y[a][n] - saida); // * derivada(z[c][n]) para MSE
+                if (strcmp(rede->ativacao, "sigmoid") == 0)
+                    deltas[c][n] = saida - y[a][n]; // BCE
+                else
+                    deltas[c][n] = (y[a][n] - saida) * derivada(z[c][n], rede->ativacao); // MSE ou outra
             }
             
             // Camadas ocultas
@@ -143,20 +146,18 @@ void asp_treinar(ASP_Rede* rede, float** X, float** y, int amostras, int epocas)
                     for (int k = 0; k < rede->neuronios[c+2]; k++)
                         soma += deltas[c+1][k] * rede->pesos[c+1][n * rede->neuronios[c+2] + k];
                     
-                    deltas[c][n] = soma * derivada(z[c][n], rede->ativacao);
+                    deltas[c][n] = soma * derivada(z[c][n], "relu");
                 }
             }
             
-            // === UPDATE ===
+            // === UPDATE PESOS & BIASES ===
             for (c = 0; c < rede->camadas-1; c++) {
                 int in = rede->neuronios[c];
                 int out = rede->neuronios[c+1];
                 
-                // Update biases
                 for (int n = 0; n < out; n++)
                     rede->biases[c][n] += rede->taxa * deltas[c][n];
                 
-                // Update pesos
                 for (int i = 0; i < in; i++)
                     for (int n = 0; n < out; n++)
                         rede->pesos[c][i * out + n] += rede->taxa * deltas[c][n] * ativacoes[c][i];
@@ -174,14 +175,11 @@ void asp_treinar(ASP_Rede* rede, float** X, float** y, int amostras, int epocas)
     }
 }
 
-// ==================== SALVAR (COM pesos.asp E config.asp) ====================
+// ==================== SALVAR ====================
 int asp_salvar(ASP_Rede* rede, const char* caminho_pasta) {
     if (!rede || !caminho_pasta) return 0;
-    
-    // Cria pasta se não existir
     mkdir(caminho_pasta, 0755);
     
-    // 1. SALVA pesos.asp (BINÁRIO)
     char pesos_path[512];
     sprintf(pesos_path, "%s/pesos.asp", caminho_pasta);
     
@@ -199,75 +197,47 @@ int asp_salvar(ASP_Rede* rede, const char* caminho_pasta) {
         fwrite(rede->pesos[c], sizeof(float), in * out, f);
         fwrite(rede->biases[c], sizeof(float), out, f);
     }
-    
     fclose(f);
     
-    // 2. GERA config.asp (JSON LEGÍVEL)
     char config_path[512];
     sprintf(config_path, "%s/config.asp", caminho_pasta);
-    
     FILE* config = fopen(config_path, "w");
     if (!config) return 0;
     
-    // Calcula parâmetros
     int total_params = 0;
-    for (int c = 0; c < rede->camadas-1; c++) {
-        total_params += rede->neuronios[c] * rede->neuronios[c+1];
-        total_params += rede->neuronios[c+1];
-    }
+    for (int c = 0; c < rede->camadas-1; c++)
+        total_params += rede->neuronios[c] * rede->neuronios[c+1] + rede->neuronios[c+1];
     
-    // Escreve config.asp
-    fprintf(config, "{\n");
-    fprintf(config, "  \"asp\": {\n");
-    fprintf(config, "    \"versao\": \"1.0\",\n");
-    fprintf(config, "    \"descricao\": \"Modelo ASP treinado\",\n");
-    fprintf(config, "    \"data_criacao\": \"%s %s\"\n", __DATE__, __TIME__);
-    fprintf(config, "  },\n");
-    
-    fprintf(config, "  \"arquitetura\": {\n");
-    fprintf(config, "    \"nome\": \"ASP-MLP\",\n");
-    fprintf(config, "    \"camadas\": %d,\n", rede->camadas);
-    fprintf(config, "    \"neuronios\": [");
+    fprintf(config,
+        "{\n"
+        "  \"asp\": {\"versao\": \"1.0\",\"descricao\": \"Modelo ASP treinado\",\"data_criacao\": \"%s %s\"},\n"
+        "  \"arquitetura\": {\"nome\": \"ASP-MLP\",\"camadas\": %d,\"neuronios\": [", 
+        __DATE__, __TIME__, rede->camadas
+    );
     for (int i = 0; i < rede->camadas; i++) {
         fprintf(config, "%d", rede->neuronios[i]);
         if (i < rede->camadas-1) fprintf(config, ", ");
     }
-    fprintf(config, "],\n");
-    fprintf(config, "    \"ativacao\": \"%s\",\n", rede->ativacao);
-    fprintf(config, "    \"parametros_totais\": %d\n", total_params);
-    fprintf(config, "  },\n");
+    fprintf(config, "],\"ativacao\": \"%s\",\"parametros_totais\": %d},\n", rede->ativacao, total_params);
     
-    fprintf(config, "  \"treino\": {\n");
-    fprintf(config, "    \"taxa_aprendizado\": %.6f,\n", rede->taxa);
-    fprintf(config, "    \"inicializacao\": \"Xavier\"\n");
-    fprintf(config, "  },\n");
-    
-    fprintf(config, "  \"arquivos\": {\n");
-    fprintf(config, "    \"pesos\": \"pesos.asp\",\n");
-    fprintf(config, "    \"config\": \"config.asp\"\n");
-    fprintf(config, "  },\n");
-    
-    fprintf(config, "  \"camadas_detalhadas\": [\n");
+    fprintf(config,
+        "  \"treino\": {\"taxa_aprendizado\": %.6f,\"inicializacao\": \"Xavier\"},\n"
+        "  \"arquivos\": {\"pesos\": \"pesos.asp\",\"config\": \"config.asp\"},\n"
+        "  \"camadas_detalhadas\": [\n", rede->taxa
+    );
     for (int c = 0; c < rede->camadas-1; c++) {
-        fprintf(config, "    {\n");
-        fprintf(config, "      \"id\": %d,\n", c);
-        fprintf(config, "      \"tipo\": \"densa\",\n");
-        fprintf(config, "      \"entrada\": %d,\n", rede->neuronios[c]);
-        fprintf(config, "      \"saida\": %d,\n", rede->neuronios[c+1]);
-        fprintf(config, "      \"pesos\": %d,\n", rede->neuronios[c] * rede->neuronios[c+1]);
-        fprintf(config, "      \"biases\": %d\n", rede->neuronios[c+1]);
-        fprintf(config, "    }%s\n", (c < rede->camadas-2) ? "," : "");
+        fprintf(config,
+            "    {\"id\": %d,\"tipo\": \"densa\",\"entrada\": %d,\"saida\": %d,\"pesos\": %d,\"biases\": %d}%s\n",
+            c, rede->neuronios[c], rede->neuronios[c+1],
+            rede->neuronios[c]*rede->neuronios[c+1], rede->neuronios[c+1],
+            (c < rede->camadas-2) ? "," : ""
+        );
     }
-    fprintf(config, "  ]\n");
-    
-    fprintf(config, "}\n");
-    
+    fprintf(config, "  ]\n}\n");
     fclose(config);
     
-    printf("  ├── pesos.asp (binário, %d bytes)\n", 
-           (int)(sizeof(int) + rede->camadas*sizeof(int) + sizeof(float) + 20 + 
-                 total_params * sizeof(float)));
-    printf("  └── config.asp (JSON, %d bytes)\n", total_params * 2);
+    printf("  ├── pesos.asp (binário)\n");
+    printf("  └── config.asp (JSON)\n");
     
     return 1;
 }
@@ -278,10 +248,7 @@ ASP_Rede* asp_carregar(const char* caminho_pasta) {
     sprintf(pesos_path, "%s/pesos.asp", caminho_pasta);
     
     FILE* f = fopen(pesos_path, "rb");
-    if (!f) {
-        printf("ERRO: Não encontrou %s\n", pesos_path);
-        return NULL;
-    }
+    if (!f) { printf("ERRO: Não encontrou %s\n", pesos_path); return NULL; }
     
     int camadas;
     fread(&camadas, sizeof(int), 1, f);
@@ -308,14 +275,10 @@ ASP_Rede* asp_carregar(const char* caminho_pasta) {
     free(neuronios);
     fclose(f);
     
-    // Verifica se config.asp existe
     char config_path[512];
     sprintf(config_path, "%s/config.asp", caminho_pasta);
     FILE* config = fopen(config_path, "r");
-    if (config) {
-        printf("✅ Modelo carregado de %s/\n", caminho_pasta);
-        fclose(config);
-    }
+    if (config) { printf("✅ Modelo carregado de %s/\n", caminho_pasta); fclose(config); }
     
     return rede;
 }
@@ -328,7 +291,7 @@ void asp_info(ASP_Rede* rede) {
         printf("%d", rede->neuronios[i]);
         if (i < rede->camadas-1) printf("->");
     }
-    printf("]\nAtivação: %s\nTaxa: %.4f\n", rede->ativacao, rede->taxa);
+    printf("]\nAtivação saída: %s\nTaxa: %.4f\n", rede->ativacao, rede->taxa);
     
     int params = 0;
     for (int c = 0; c < rede->camadas-1; c++)
